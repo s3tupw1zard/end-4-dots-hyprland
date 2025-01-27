@@ -1,0 +1,82 @@
+name: Sync Fork with Conflict Notification
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Every day at midnight
+  workflow_dispatch: # Manually trigger the workflow from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add Upstream
+        run: |
+          git remote add upstream https://github.com/end-4/dots-hyprland.git
+          git fetch upstream
+
+      - name: Try to merge
+        id: merge
+        run: |
+          git checkout main
+          {
+            git merge --no-commit upstream/main
+          } || {
+            echo "CONFLICT DETECTED" > conflict_detected.txt
+            git status >> conflict_detected.txt
+          }
+
+      - name: Check for Conflicts
+        id: conflict_check
+        run: |
+          if [ -f conflict_detected.txt ]; then
+            echo "true" > conflict_status.txt
+          else
+            echo "false" > conflict_status.txt
+          fi
+
+      - name: Upload Conflict Status
+        uses: actions/upload-artifact@v3
+        with:
+          name: conflict-status
+          path: |
+            conflict_status.txt
+            conflict_detected.txt
+
+      - name: Push Changes (if no conflicts)
+        if: success() && !failure()
+        run: |
+          git push origin main
+
+  notify:
+    needs: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Conflict Status
+        uses: actions/download-artifact@v3
+        with:
+          name: conflict-status
+
+      - name: Check Conflict Status
+        id: read_conflict
+        run: |
+          CONFLICT=$(cat conflict_status.txt)
+          echo "conflict=$CONFLICT" >> $GITHUB_ENV
+
+      - name: Notify About Conflicts
+        if: steps.read_conflict.outputs.conflict == 'true'
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "title": "Sync Conflict Detected",
+              "body": "A conflict occurred during the automatic fork synchronization.\\n\\n**Details:**\\n```\\n'"$(cat conflict_detected.txt | jq -R -s .)"'\\n```\\nPlease resolve it manually.",
+              "labels": ["sync", "conflict"]
+            }' \
+            https://api.github.com/repos/${{ github.repository }}/issues
